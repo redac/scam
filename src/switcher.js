@@ -2,73 +2,107 @@ const SECURE_ORIGIN = 'https://secure.soundcloud.com';
 let previousUser;
 
 const sel = (selector) => document.querySelector(selector);
-const getSession = (username) => JSON.parse(localStorage.getItem('sc-accounts'))[username];
+
+const getSession = (username) => new Promise((resolve) => {
+  chrome.storage.local.get('sc-accounts', (result) => {
+    const accounts = result['sc-accounts'] || {};
+    resolve(accounts[username]);
+  });
+});
+
+const getAllSessions = () => new Promise((resolve) => {
+  chrome.storage.local.get('sc-accounts', (result) => {
+    resolve(result['sc-accounts'] || {});
+  });
+});
+
 const getCurrentUser = () => {
   if (sel('.header__userNavUsernameButton') !== null) {
-    return new URL(sel('.header__userNavUsernameButton').href).pathname.substr(1);
+    return new URL(sel('.header__userNavUsernameButton').href).pathname.substr(
+      1,
+    );
   }
 
   return false;
 };
 
-const saveSession = (username, sessionData) => {
-  const obj = localStorage.hasOwnProperty('sc-accounts') ? JSON.parse(localStorage.getItem('sc-accounts')) : {};
-  const storedCookie = Object.keys(obj).find((user) => obj[user].cookie === sessionData.cookie);
-  if (storedCookie && username !== storedCookie) delete obj[storedCookie];
-  obj[username] = sessionData;
-  localStorage.setItem('sc-accounts', JSON.stringify(obj));
+const saveSession = async (username, sessionData) => {
+  const accounts = await getAllSessions();
+  const storedCookie = Object.keys(accounts).find(
+    (user) => accounts[user].cookie === sessionData.cookie,
+  );
+
+  if (storedCookie && username !== storedCookie) delete accounts[storedCookie];
+  accounts[username] = sessionData;
+
+  chrome.storage.local.set({ 'sc-accounts': accounts });
 };
 
-const deleteSession = (username) => {
-  if (localStorage.hasOwnProperty('sc-accounts')) {
-    const obj = JSON.parse(localStorage.getItem('sc-accounts'));
-    delete obj[username];
-    localStorage.setItem('sc-accounts', JSON.stringify(obj));
-  }
+const deleteSession = async (username) => {
+  const accounts = await getAllSessions();
+  delete accounts[username];
+  chrome.storage.local.set({ 'sc-accounts': accounts });
 };
 
-const saveCurrentSession = () => {
+const saveCurrentSession = async () => {
   const username = getCurrentUser();
   if (username === false) return;
 
-  const sessionData = getSession(username) || {};
+  const sessionData = (await getSession(username)) || {};
+
   sessionData.notifyState = localStorage.getItem('V2::local::notify');
-  saveSession(username, sessionData);
+  await saveSession(username, sessionData);
 
   if (previousUser === username || !username) return;
   previousUser = username;
-  chrome.runtime.sendMessage({ method: 'getCookie', data: { name: 'oauth_token' } }, (data) => {
-    const cookie = data ? data.value : null;
-    if (!cookie) return;
 
-    sessionData.cookie = cookie;
-    saveSession(username, sessionData);
-  });
+  chrome.runtime.sendMessage(
+    { method: 'getCookie', data: { name: 'oauth_token' } },
+    async (data) => {
+      const cookie = data ? data.value : null;
+      if (!cookie) return;
+
+      sessionData.cookie = cookie;
+      await saveSession(username, sessionData);
+    },
+  );
 };
 
-const switchSession = (user) => {
-  saveCurrentSession();
+const switchSession = async (user) => {
+  await saveCurrentSession();
 
-  const sessionData = getSession(user);
-  if (sessionData.notifyState != null) localStorage.setItem('V2::local::notify', sessionData.notifyState);
+  const sessionData = await getSession(user);
+  if (sessionData.notifyState != null) {
+    localStorage.setItem('V2::local::notify', sessionData.notifyState);
+  }
 
-  chrome.runtime.sendMessage({ method: 'setCookie', data: { name: 'oauth_token', value: sessionData.cookie } }, () => {
-    location.reload();
-  });
+  chrome.runtime.sendMessage(
+    {
+      method: 'setCookie',
+      data: { name: 'oauth_token', value: sessionData.cookie },
+    },
+    () => {
+      location.reload();
+    },
+  );
 };
 
-const forceLogout = () => {
-  saveCurrentSession();
-  chrome.runtime.sendMessage({ method: 'removeCookie', data: { name: 'oauth_token' } }, () => {
-    chrome.runtime.sendMessage({ method: 'forceLogout' }, () => {
-      window.location = 'https://soundcloud.com/signin';
-    });
-  });
+const forceLogout = async () => {
+  await saveCurrentSession();
+  chrome.runtime.sendMessage(
+    { method: 'removeCookie', data: { name: 'oauth_token' } },
+    () => {
+      chrome.runtime.sendMessage({ method: 'forceLogout' }, () => {
+        window.location = 'https://soundcloud.com/signin';
+      });
+    },
+  );
 };
 
-const injectSwitcher = () => {
-  if (localStorage.hasOwnProperty('sc-accounts')) {
-    const accounts = JSON.parse(localStorage.getItem('sc-accounts'));
+const injectSwitcher = async () => {
+  const accounts = await getAllSessions();
+
+  if (Object.keys(accounts).length > 0) {
     const list = document.createElement('ul');
     list.setAttribute('class', 'profileMenu__list sc-list-nostyle');
 
@@ -79,7 +113,6 @@ const injectSwitcher = () => {
     addLink.innerText = 'Add Account';
     addLink.id = 'add-account';
     addLink.href = '#';
-
 
     addBtn.onclick = () => {
       forceLogout();
@@ -108,7 +141,6 @@ const injectSwitcher = () => {
       link.style.overflow = 'hidden';
       link.style.verticalAlign = 'middle';
 
-
       const delBtn = document.createElement('a');
 
       delBtn.setAttribute('class', 'headerMenu__profile');
@@ -120,10 +152,18 @@ const injectSwitcher = () => {
       delBtn.style.display = 'inline-block';
       delBtn.style.verticalAlign = 'middle';
 
-      delBtn.onclick = (event) => {
-        if (confirm(`Are you sure you want to remove the '${event.target.dataset.user}' account?`)) { // eslint-disable-line
-          deleteSession(event.target.dataset.user);
-          event.target.parentNode.parentNode.removeChild(event.target.parentNode);
+      delBtn.onclick = async (event) => {
+        if (
+          // eslint-disable-next-line no-alert
+          confirm(
+            `Are you sure you want to remove the '${event.target.dataset.user}' account?`,
+          )
+        ) {
+          // eslint-disable-line
+          await deleteSession(event.target.dataset.user);
+          event.target.parentNode.parentNode.removeChild(
+            event.target.parentNode,
+          );
         }
       };
 
@@ -140,23 +180,35 @@ const injectSwitcher = () => {
   }
 };
 
-const passSessions = (element) => {
-  const obj = localStorage.hasOwnProperty('sc-accounts') ? JSON.parse(localStorage.getItem('sc-accounts')) : {};
-  element.contentWindow.postMessage(['_scam_sessions', obj], SECURE_ORIGIN);
+const passSessions = async (element) => {
+  const accounts = await getAllSessions();
+  element.contentWindow.postMessage(
+    ['_scam_sessions', accounts],
+    SECURE_ORIGIN,
+  );
 };
 
 const menuObserver = new MutationObserver((mutations) => {
   for (const mutation of mutations) {
     const addedNodes = Array.from(mutation.addedNodes);
-    if (addedNodes.includes(sel('.dropdownMenu')) || addedNodes.includes(sel('.headerMenu__list'))) {
+    if (
+      addedNodes.includes(sel('.dropdownMenu'))
+      || addedNodes.includes(sel('.headerMenu__list'))
+    ) {
       injectSwitcher();
     }
-    if (mutation.target.classList && [...mutation.target.classList].includes('header__userNavUsernameButton')) {
+    if (
+      mutation.target.classList
+      && [...mutation.target.classList].includes('header__userNavUsernameButton')
+    ) {
       saveCurrentSession();
     }
 
     addedNodes.forEach((node) => {
-      if (node.querySelector && node.querySelector('.webAuthContainer iframe')) {
+      if (
+        node.querySelector
+        && node.querySelector('.webAuthContainer iframe')
+      ) {
         const iframe = node.querySelector('.webAuthContainer iframe');
         iframe.onload = () => {
           passSessions(iframe);
@@ -166,22 +218,36 @@ const menuObserver = new MutationObserver((mutations) => {
   }
 });
 
-window.addEventListener('message', (message) => {
-  const { origin, data } = message;
-  if (origin !== SECURE_ORIGIN) return;
+window.addEventListener(
+  'message',
+  (message) => {
+    const { origin, data } = message;
+    if (origin !== SECURE_ORIGIN) return;
 
-  if (data === '_scam_reload') {
-    window.location.reload(true);
+    if (data === '_scam_reload') {
+      window.location.reload();
+    }
+  },
+  false,
+);
+
+const init = async () => {
+  // Migrate from localStorage to chrome.storage if needed
+  if (localStorage.hasOwnProperty('sc-accounts')) {
+    try {
+      const sessions = JSON.parse(localStorage.getItem('sc-accounts')) || {};
+      Object.keys(sessions).forEach((username) => {
+        if (typeof sessions[username] === 'string') sessions[username] = { cookie: sessions[username] };
+      });
+
+      chrome.storage.local.set({ 'sc-accounts': sessions }, () => {
+        localStorage.removeItem('sc-accounts');
+      });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Error migrating session data:', e);
+    }
   }
-}, false);
-
-const init = () => {
-  // Migrate from old user sessions format
-  const sessions = localStorage.hasOwnProperty('sc-accounts') ? JSON.parse(localStorage.getItem('sc-accounts')) : {};
-  Object.keys(sessions).forEach((username) => {
-    if (typeof sessions[username] === 'string') sessions[username] = { cookie: sessions[username] };
-  });
-  localStorage.setItem('sc-accounts', JSON.stringify(sessions));
 
   const observerOptions = { childList: true, subtree: true };
   menuObserver.observe(document.body, observerOptions);
